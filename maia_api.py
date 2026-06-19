@@ -1,21 +1,31 @@
 # Standard library imports
 import math
 import os
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
-import clip
 import numpy as np
 
 # Third-party imports
-import openai
 import torch
 import torch.nn.functional as F
 import torchvision.models as models
-from baukit import Trace
 from PIL import Image
 from torchvision import transforms
 
-from synthetic_neurons_dataset.synthetic_neurons import SAMNeuron
+try:
+    import clip
+except ImportError:
+    clip = None
+
+try:
+    from baukit import Trace
+except ImportError:
+    Trace = None
+
+try:
+    from synthetic_neurons_dataset.synthetic_neurons import SAMNeuron
+except ImportError:
+    SAMNeuron = None
 
 # Local imports
 from utils.agents.factory import create_agent
@@ -118,6 +128,8 @@ class System:
                 .eval()
             )
         elif model_name == "clip-RN50":
+            if clip is None:
+                raise ImportError("clip is required for model_name='clip-RN50'")
             name = "RN50"
             full_model, preprocess = clip.load(
                 name, download_root="/data/scratch/yusepp/.cache/clip"
@@ -125,6 +137,8 @@ class System:
             model = full_model.visual.to(self.device).eval()
             self.preprocess = preprocess
         elif model_name == "clip-ViT-B32":
+            if clip is None:
+                raise ImportError("clip is required for model_name='clip-ViT-B32'")
             name = "ViT-B/32"
             full_model, preprocess = clip.load(name)
             model = full_model.visual.to(self.device).eval()
@@ -245,6 +259,8 @@ class System:
         >>>   neuron = load_neuron(neuron_num=62, layer='layer4', model=model)
         >>>   return neuron
         """
+        if Trace is None:
+            raise ImportError("baukit is required for System._calc_activations")
         with Trace(self.model, self.layer) as ret:
             _ = self.model(image)
             hiddens = ret.output
@@ -356,6 +372,10 @@ class Synthetic_System:
         )
         self.neuron_num = neuron_num
         self.neuron_labels = neuron_labels
+        if SAMNeuron is None:
+            raise ImportError(
+                "synthetic_neurons_dataset is required for Synthetic_System"
+            )
         self.neuron = SAMNeuron(neuron_labels, neuron_mode, device=self.device)
         self.threshold = 0
         self.layer = neuron_mode
@@ -465,6 +485,7 @@ class Tools:
         device: str,
         DatasetExemplars: DatasetExemplars = None,
         image2text_model_name="gpt-4o",
+        image2text_base_url: Optional[str] = None,
         text2image_model: Any = None,
         img2img_model: Any = None,
     ):
@@ -488,6 +509,7 @@ class Tools:
             f"cuda:{device}" if torch.cuda.is_available() else "cpu"
         )
         self.image2text_model_name = image2text_model_name
+        self.image2text_base_url = image2text_base_url
         self.text2image_model = text2image_model
         self.img2img_model = img2img_model
         self.experiment_log = []
@@ -498,6 +520,17 @@ class Tools:
             self.exempalrs_thresholds = DatasetExemplars.thresholds
         self.activation_threshold = 0
         self.results_list = []
+
+    def _create_image2text_agent(self):
+        extra_kwargs = {}
+        if "local" in self.image2text_model_name and self.image2text_base_url:
+            extra_kwargs["base_url"] = self.image2text_base_url
+        return create_agent(
+            model=self.image2text_model_name,
+            max_attempts=5,
+            max_output_tokens=4096,
+            **extra_kwargs,
+        )
 
     def dataset_exemplars(self, system: System) -> List[List[Tuple[float, str]]]:
         """
@@ -598,6 +631,8 @@ class Tools:
             raise ValueError("Length of base_images and editing_prompts must be equal.")
         if isinstance(editing_prompts, str):
             editing_prompts = [editing_prompts]
+        if self.img2img_model is None:
+            raise RuntimeError("edit_images is unavailable because no image-editing model is loaded.")
 
         base_imgs_obj = [str2image(img_b64) for img_b64 in base_images]
         edited_images_b64_lists = self.img2img_model(editing_prompts, base_imgs_obj)
@@ -639,6 +674,8 @@ class Tools:
         >>>     images = tools.text2image(prompt_list)
         >>>     tools.display(*images)
         """
+        if self.text2image_model is None:
+            raise RuntimeError("text2image is unavailable because no text-to-image model is loaded.")
         images = self.text2image_model(prompt_list)
         return [image2str(img) for img in images]
 
@@ -689,9 +726,7 @@ class Tools:
             user_content.append(format_api_content("image_url", image))
         history.append({"role": "user", "content": user_content})
 
-        agent = create_agent(
-            model=self.image2text_model_name, max_attempts=5, max_output_tokens=4096
-        )
+        agent = self._create_image2text_agent()
 
         description = agent.ask(history)
         if isinstance(description, Exception):
@@ -781,9 +816,7 @@ class Tools:
                     ],
                 },
             ]
-            agent = create_agent(
-                model=self.image2text_model_name, max_attempts=5, max_output_tokens=4096
-            )
+            agent = self._create_image2text_agent()
             description = agent.ask(history)
             if isinstance(description, Exception):
                 return description_list

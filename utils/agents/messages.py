@@ -2,9 +2,12 @@ import base64
 from io import BytesIO
 from typing import Any
 
-import tiktoken
 from PIL import Image
-from tiktoken.core import Encoding
+
+try:
+    import tiktoken
+except ImportError:
+    tiktoken = None
 
 # Rough estimate: 512x512 ~ 85 tokens based on OpenAI
 TILE_SIZE = 512
@@ -13,11 +16,13 @@ CONTEXT_BUDGET = 0.90
 
 Message = dict[str, Any]
 # Tiktoken Text Encoder
-encoder: Encoding = tiktoken.get_encoding('cl100k_base')
+encoder = tiktoken.get_encoding("cl100k_base") if tiktoken is not None else None
 
 
 def _rough_text_tokens(s: str) -> int:
     """Rough token estimation using tiktoken encoder"""
+    if encoder is None:
+        return max(1, len(s) // 4)
     return len(encoder.encode(s))
 
 

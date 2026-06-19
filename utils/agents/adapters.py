@@ -1,8 +1,15 @@
+import json
 from typing import Any
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
 
 import anthropic
-import openai
 from anthropic.types import Message
+
+try:
+    import openai
+except ImportError:
+    openai = None
 
 from .messages import normalize_messages, to_antrophic
 
@@ -20,6 +27,11 @@ class OpenAIAdapter:
         organization: str | None = None,
         base_url: str | None = None,
     ):
+        if openai is None:
+            raise ImportError(
+                "The openai package is required only when using AGENT=gpt-*. "
+                "Use AGENT=local-<model> for vLLM without installing openai."
+            )
         openai.api_key = api_key
         if organization:
             openai.organization = organization
@@ -50,10 +62,9 @@ class OpenAIAdapter:
         return resp['choices'][0]['message']['content']
 
 
-class LocalAdapter(OpenAIAdapter):
+class LocalAdapter:
     """
     For OpenAI-compatible local servers (vLLM, Ollama bridges, etc.).
-    WARNING: sets global openai.api_base; avoid mixing with real OpenAI concurrently.
     """
 
     def __init__(
@@ -63,8 +74,10 @@ class LocalAdapter(OpenAIAdapter):
         api_key: str = 'dummy',
         allow_system: bool = False,  # Gemma / many local backends don't support system
     ):
-        super().__init__(api_key=api_key, model=model, base_url=base_url)
-        self._allow_system = allow_system  # override
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.api_key = api_key
+        self._allow_system = allow_system
 
     def complete(
         self,
@@ -87,7 +100,21 @@ class LocalAdapter(OpenAIAdapter):
             'max_tokens': max_output_tokens,
         }
         params.update(kwargs)
-        resp: dict[str, Any] = openai.ChatCompletion.create(**params)
+        request = Request(
+            f"{self.base_url}/chat/completions",
+            data=json.dumps(params).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=300) as response:
+                resp = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Local model request failed: HTTP {exc.code}: {body}") from exc
         return resp['choices'][0]['message']['content']
 
 

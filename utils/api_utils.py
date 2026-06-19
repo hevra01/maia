@@ -5,11 +5,21 @@ from PIL import Image
 from pydantic import BaseModel
 import torch
 from torchvision import models, transforms
-import timm
-import clip
 
-from netdissect.imgviz import ImageVisualizer
-from netdissect.imgviz import ImageVisualizer
+try:
+    import clip
+except ImportError:
+    clip = None
+
+try:
+    import timm
+except ImportError:
+    timm = None
+
+try:
+    from netdissect.imgviz import ImageVisualizer
+except ImportError:
+    ImageVisualizer = None
 
 
 class Unit(BaseModel):
@@ -71,11 +81,15 @@ class ModelInfoWrapper:
         elif model_name == 'dino_vits8':
             model = torch.hub.load('facebookresearch/dino:main', 'dino_vits8').to(self.device).eval()
         elif model_name == "clip-RN50": 
+            if clip is None:
+                raise ImportError("clip is required for model_name='clip-RN50'")
             name = 'RN50'
             full_model, preprocess = clip.load(name)
             model = full_model.visual.to(self.device).eval()
             self.preprocess = preprocess
         elif model_name == "clip-ViT-B32": 
+            if clip is None:
+                raise ImportError("clip is required for model_name='clip-ViT-B32'")
             name = 'ViT-B/32'
             full_model, preprocess = clip.load(name)
             model = full_model.visual.to(self.device).eval()
@@ -90,6 +104,8 @@ class ModelInfoWrapper:
             elif model_name == "gradnorm_resnet_gelu":
                 check_path = "/data/vision/torralba/scratch/adrianr/input_norm/eccv_outputs/gradnorm_resnet_gelu/2024-02-03_22-07-28/snapshots/snapshot-49-5003.pth.tar"
 
+            if timm is None:
+                raise ImportError("timm is required for GELU model variants")
             model = timm.models.create_model("resnet50", checkpoint_path=check_path, pretrained=True).to(self.device).eval()
             self._replace_layers(model, torch.nn.ReLU, torch.nn.GELU)
         
@@ -168,17 +184,34 @@ def is_base64(s: str)->bool:
 
 
 def base64_to_url(base64_str: str):
-    '''Converts a base64 string to a URL
-    
+    '''Converts a base64 string to a data URL.
+
     Parameters
     ----------
     base64_str : str
         The base64 string to be converted.'''
-    
-    return "data:image/jpeg;base64," + base64_str
+
+    media_type = "image/jpeg"
+    try:
+        raw = base64.b64decode(base64_str)
+        with Image.open(BytesIO(raw)) as image:
+            fmt = (image.format or "").upper()
+        media_type = {
+            "PNG": "image/png",
+            "JPEG": "image/jpeg",
+            "JPG": "image/jpeg",
+            "GIF": "image/gif",
+            "WEBP": "image/webp",
+        }.get(fmt, media_type)
+    except Exception:
+        pass
+
+    return f"data:{media_type};base64,{base64_str}"
 
 # TODO - Clean up
 def generate_masked_image(image,mask,path2save,threshold):
+    if ImageVisualizer is None:
+        raise ImportError("netdissect is required for generate_masked_image")
     vis = ImageVisualizer(224, image_size=224, source='imagenet')
     masked_tensor = vis.pytorch_masked_image(image, activations=mask, unit=None, level=threshold, outside_bright=0.25) #percent_level=0.95)
     masked_image = Image.fromarray(masked_tensor.permute(1, 2, 0).byte().cpu().numpy())
