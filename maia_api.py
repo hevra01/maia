@@ -486,6 +486,7 @@ class Tools:
         DatasetExemplars: DatasetExemplars = None,
         image2text_model_name="gpt-4o",
         image2text_base_url: Optional[str] = None,
+        image2text_max_output_tokens: int = 1024,
         text2image_model: Any = None,
         img2img_model: Any = None,
     ):
@@ -510,6 +511,7 @@ class Tools:
         )
         self.image2text_model_name = image2text_model_name
         self.image2text_base_url = image2text_base_url
+        self.image2text_max_output_tokens = image2text_max_output_tokens
         self.text2image_model = text2image_model
         self.img2img_model = img2img_model
         self.experiment_log = []
@@ -528,7 +530,7 @@ class Tools:
         return create_agent(
             model=self.image2text_model_name,
             max_attempts=5,
-            max_output_tokens=4096,
+            max_output_tokens=self.image2text_max_output_tokens,
             **extra_kwargs,
         )
 
@@ -729,6 +731,8 @@ class Tools:
         agent = self._create_image2text_agent()
 
         description = agent.ask(history)
+        if description is None:
+            raise RuntimeError("Image-description model returned no response.")
         if isinstance(description, Exception):
             return description
         return description
@@ -818,6 +822,8 @@ class Tools:
             ]
             agent = self._create_image2text_agent()
             description = agent.ask(history)
+            if description is None:
+                raise RuntimeError("Image-description model returned no response.")
             if isinstance(description, Exception):
                 return description_list
             description = description.split("[HIGHLIGHTED REGIONS]:")[-1]

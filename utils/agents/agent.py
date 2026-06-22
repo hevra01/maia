@@ -81,5 +81,5 @@ class Agent:
                 if not retry:
                     log.error("Agent error: %r", e)
                     traceback.print_exc()
-                    return
+                    raise
                 self.retry.sleep()
