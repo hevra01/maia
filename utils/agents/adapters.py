@@ -1,4 +1,5 @@
 import json
+import os
 import re
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -12,7 +13,56 @@ try:
 except ImportError:
     openai = None
 
-from .messages import normalize_messages, to_antrophic
+from .messages import (
+    _rough_image_tokens,
+    _rough_message_tokens,
+    _rough_text_tokens,
+    normalize_messages,
+    to_antrophic,
+)
+
+
+def _content_debug_stats(content: Any) -> dict[str, int]:
+    stats = {
+        "text_chars": 0,
+        "rough_text_tokens": 0,
+        "image_count": 0,
+        "image_base64_chars": 0,
+        "rough_image_tokens": 0,
+    }
+    if isinstance(content, str):
+        stats["text_chars"] += len(content)
+        stats["rough_text_tokens"] += _rough_text_tokens(content)
+        return stats
+
+    if not isinstance(content, list):
+        return stats
+
+    for part in content:
+        if not isinstance(part, dict):
+            continue
+        if part.get("type") == "text":
+            text = str(part.get("text", "") or "")
+            stats["text_chars"] += len(text)
+            stats["rough_text_tokens"] += _rough_text_tokens(text)
+        elif part.get("type") == "image_url":
+            url = (part.get("image_url") or {}).get("url") or ""
+            stats["image_count"] += 1
+            if isinstance(url, str) and url.startswith("data:image") and "," in url:
+                stats["image_base64_chars"] += len(url.split(",", 1)[1])
+            stats["rough_image_tokens"] += _rough_image_tokens(url)
+    return stats
+
+
+def _sum_stats(rows: list[dict[str, int]]) -> dict[str, int]:
+    keys = [
+        "text_chars",
+        "rough_text_tokens",
+        "image_count",
+        "image_base64_chars",
+        "rough_image_tokens",
+    ]
+    return {key: sum(row.get(key, 0) for row in rows) for key in keys}
 
 
 class OpenAIAdapter:
@@ -77,6 +127,80 @@ class LocalAdapter:
         self.model = model
         self.api_key = api_key
         self._allow_system = allow_system
+        self._debug_tokens = os.getenv("MAIA_DEBUG_TOKENS", "0") == "1"
+
+    def _print_token_debug(
+        self,
+        raw_messages: list[dict[str, Any]],
+        norm_messages: list[dict[str, Any]],
+        *,
+        max_output_tokens: int,
+        attempt: int,
+    ) -> None:
+        if not self._debug_tokens:
+            return
+
+        raw_system_stats = _sum_stats(
+            [
+                _content_debug_stats(message.get("content"))
+                for message in raw_messages
+                if message.get("role") == "system"
+            ]
+        )
+        raw_non_system_stats = _sum_stats(
+            [
+                _content_debug_stats(message.get("content"))
+                for message in raw_messages
+                if message.get("role") != "system"
+            ]
+        )
+        norm_stats_by_message = [
+            {
+                **_content_debug_stats(message.get("content")),
+                "rough_total_tokens": _rough_message_tokens(message),
+                "role": str(message.get("role")),
+            }
+            for message in norm_messages
+        ]
+        norm_total = _sum_stats(norm_stats_by_message)
+        rough_norm_message_tokens = sum(row["rough_total_tokens"] for row in norm_stats_by_message)
+
+        print(
+            "[MAIA_TOKEN_DEBUG] local request "
+            f"model={self.model} attempt={attempt} max_output_tokens={max_output_tokens} "
+            f"raw_messages={len(raw_messages)} normalized_messages={len(norm_messages)}"
+        )
+        print(
+            "[MAIA_TOKEN_DEBUG] raw_system "
+            f"rough_text_tokens={raw_system_stats['rough_text_tokens']} "
+            f"text_chars={raw_system_stats['text_chars']} "
+            f"images={raw_system_stats['image_count']} "
+            f"rough_image_tokens={raw_system_stats['rough_image_tokens']}"
+        )
+        print(
+            "[MAIA_TOKEN_DEBUG] raw_non_system "
+            f"rough_text_tokens={raw_non_system_stats['rough_text_tokens']} "
+            f"text_chars={raw_non_system_stats['text_chars']} "
+            f"images={raw_non_system_stats['image_count']} "
+            f"rough_image_tokens={raw_non_system_stats['rough_image_tokens']}"
+        )
+        print(
+            "[MAIA_TOKEN_DEBUG] normalized_payload "
+            f"rough_message_tokens={rough_norm_message_tokens} "
+            f"rough_text_tokens={norm_total['rough_text_tokens']} "
+            f"images={norm_total['image_count']} "
+            f"image_base64_chars={norm_total['image_base64_chars']} "
+            f"rough_image_tokens={norm_total['rough_image_tokens']}"
+        )
+        for idx, row in enumerate(norm_stats_by_message):
+            print(
+                "[MAIA_TOKEN_DEBUG] normalized_message "
+                f"index={idx} role={row['role']} "
+                f"rough_total_tokens={row['rough_total_tokens']} "
+                f"rough_text_tokens={row['rough_text_tokens']} "
+                f"text_chars={row['text_chars']} images={row['image_count']} "
+                f"rough_image_tokens={row['rough_image_tokens']}"
+            )
 
     @staticmethod
     def _retry_tokens_after_context_error(body: str, requested_tokens: int) -> int | None:
@@ -98,7 +222,8 @@ class LocalAdapter:
         context_tokens = int(context_match.group(1))
         input_tokens = int(input_match.group(1))
         absolute_room = context_tokens - input_tokens
-        if absolute_room < 64:
+        min_retry_tokens = 16
+        if absolute_room < min_retry_tokens:
             return None
 
         # Be deliberately conservative. vLLM's reported prompt-token count can
@@ -107,10 +232,10 @@ class LocalAdapter:
         if absolute_room >= 192:
             safe_by_room = absolute_room - 128
         else:
-            safe_by_room = absolute_room // 2
+            safe_by_room = max(min_retry_tokens, absolute_room - 8)
         aggressive_step = int(requested_tokens * 0.75)
         retry_tokens = min(requested_tokens - 1, safe_by_room, aggressive_step)
-        if retry_tokens < 64 or retry_tokens >= requested_tokens:
+        if retry_tokens < min_retry_tokens or retry_tokens >= requested_tokens:
             return None
         return retry_tokens
 
@@ -142,6 +267,12 @@ class LocalAdapter:
         }
         last_error: str | None = None
         for _attempt in range(8):
+            self._print_token_debug(
+                messages,
+                norm_messages,
+                max_output_tokens=int(params["max_tokens"]),
+                attempt=_attempt + 1,
+            )
             request = Request(
                 url,
                 data=json.dumps(params).encode("utf-8"),
@@ -151,6 +282,15 @@ class LocalAdapter:
             try:
                 with urlopen(request, timeout=300) as response:
                     resp = json.loads(response.read().decode("utf-8"))
+                if self._debug_tokens and isinstance(resp.get("usage"), dict):
+                    usage = resp["usage"]
+                    print(
+                        "[MAIA_TOKEN_DEBUG] response_usage "
+                        f"prompt_tokens={usage.get('prompt_tokens')} "
+                        f"completion_tokens={usage.get('completion_tokens')} "
+                        f"total_tokens={usage.get('total_tokens')} "
+                        f"details={usage}"
+                    )
                 return resp["choices"][0]["message"]["content"]
             except HTTPError as exc:
                 body = exc.read().decode("utf-8", errors="replace")
@@ -158,6 +298,8 @@ class LocalAdapter:
                 retry_tokens = self._retry_tokens_after_context_error(
                     body, int(params["max_tokens"])
                 )
+                if self._debug_tokens:
+                    print(f"[MAIA_TOKEN_DEBUG] http_error status={exc.code} body={body}")
                 if retry_tokens is not None:
                     print(
                         "Local model context window is tight; retrying with "

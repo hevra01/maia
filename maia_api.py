@@ -509,6 +509,7 @@ class Tools:
         self.device = torch.device(
             f"cuda:{device}" if torch.cuda.is_available() else "cpu"
         )
+        self.path2save = path2save
         self.image2text_model_name = image2text_model_name
         self.image2text_base_url = image2text_base_url
         self.image2text_max_output_tokens = image2text_max_output_tokens
